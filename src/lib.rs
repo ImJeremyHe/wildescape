@@ -36,8 +36,24 @@ pub struct WildMatch {
 
 #[derive(Debug, Clone, PartialEq)]
 struct State {
-    next_char: Option<char>,
+    next_char: Char,
     has_wildcard: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Copy)]
+enum Char {
+    Char(char),
+    QuestionMark,
+    None,
+}
+
+impl Char {
+    pub fn is_none(&self) -> bool {
+        match self {
+            Char::None => true,
+            _ => false,
+        }
+    }
 }
 
 impl fmt::Display for WildMatch {
@@ -48,7 +64,10 @@ impl fmt::Display for WildMatch {
             if state.has_wildcard {
                 f.write_char('*')?;
             }
-            if let Some(c) = state.next_char {
+            if let Char::QuestionMark = state.next_char {
+                f.write_char('?')?;
+            }
+            if let Char::Char(c) = state.next_char {
                 f.write_char(c)?;
             }
         }
@@ -63,30 +82,77 @@ impl WildMatch {
         let mut prev_was_star = false;
         let mut max_questionmarks: usize = 0;
         let mut questionmarks: usize = 0;
+        let mut escaped = false;
         for current_char in pattern.chars() {
             match current_char {
                 '*' => {
-                    prev_was_star = true;
+                    if escaped {
+                        let s = State {
+                            next_char: Char::Char(current_char),
+                            has_wildcard: prev_was_star,
+                        };
+                        simplified.push(s);
+                        escaped = false;
+                    } else {
+                        prev_was_star = true;
+                    }
                     max_questionmarks = std::cmp::max(max_questionmarks, questionmarks);
                     questionmarks = 0;
                 }
-                _ => {
-                    if current_char == '?' {
+                '~' => {
+                    if escaped {
+                        let s = State {
+                            next_char: Char::Char(current_char),
+                            has_wildcard: prev_was_star,
+                        };
+                        simplified.push(s);
+                        escaped = false;
+                    } else {
+                        escaped = true;
+                    }
+                    prev_was_star = false;
+                    max_questionmarks = std::cmp::max(max_questionmarks, questionmarks);
+                    questionmarks = 0;
+                }
+                '?' => {
+                    let s = if escaped {
+                        escaped = false;
+                        max_questionmarks = std::cmp::max(max_questionmarks, questionmarks);
+                        questionmarks = 0;
+                        State {
+                            next_char: Char::Char(current_char),
+                            has_wildcard: prev_was_star,
+                        }
+                    } else {
                         questionmarks += 1;
+                        State {
+                            next_char: Char::QuestionMark,
+                            has_wildcard: prev_was_star,
+                        }
+                    };
+                    simplified.push(s);
+                    prev_was_star = false;
+                }
+                _ => {
+                    if escaped {
+                        // In this case, escape character is meaningless. Just ignore it.
+                        escaped = false;
                     }
                     let s = State {
-                        next_char: Some(current_char),
+                        next_char: Char::Char(current_char),
                         has_wildcard: prev_was_star,
                     };
                     simplified.push(s);
                     prev_was_star = false;
+                    max_questionmarks = std::cmp::max(max_questionmarks, questionmarks);
+                    questionmarks = 0;
                 }
             }
         }
 
         if !pattern.is_empty() {
             let final_state = State {
-                next_char: None,
+                next_char: Char::None,
                 has_wildcard: prev_was_star,
             };
             simplified.push(final_state);
@@ -96,11 +162,6 @@ impl WildMatch {
             pattern: simplified,
             max_questionmarks,
         }
-    }
-
-    #[deprecated(since = "2.0.0", note = "use `matches` instead")]
-    pub fn is_match(&self, input: &str) -> bool {
-        self.matches(input)
     }
 
     /// Returns true if pattern applies to the given input string
@@ -117,14 +178,14 @@ impl WildMatch {
                 None => {
                     return false;
                 }
-                Some(p) if p.next_char == Some('?') => {
+                Some(p) if p.next_char == Char::QuestionMark => {
                     if p.has_wildcard {
                         last_wildcard_idx = pattern_idx;
                     }
                     pattern_idx += 1;
                     questionmark_matches.push(input_char);
                 }
-                Some(p) if p.next_char == Some(input_char) => {
+                Some(p) if p.next_char == Char::Char(input_char) => {
                     if p.has_wildcard {
                         last_wildcard_idx = pattern_idx;
                         questionmark_matches.clear();
@@ -132,7 +193,7 @@ impl WildMatch {
                     pattern_idx += 1;
                 }
                 Some(p) if p.has_wildcard => {
-                    if p.next_char == None {
+                    if p.next_char == Char::None {
                         return true;
                     }
                 }
@@ -146,13 +207,14 @@ impl WildMatch {
                         let current_idx = pattern_idx;
                         pattern_idx = last_wildcard_idx;
                         for prev_state in self.pattern[last_wildcard_idx + 1..current_idx].iter() {
-                            if self.pattern[pattern_idx].next_char == Some('?') {
+                            if self.pattern[pattern_idx].next_char == Char::QuestionMark {
                                 pattern_idx += 1;
                                 continue;
                             }
                             let mut prev_input_char = prev_state.next_char;
-                            if prev_input_char == Some('?') {
-                                prev_input_char = Some(questionmark_matches[questionmark_idx]);
+                            if prev_input_char == Char::QuestionMark {
+                                prev_input_char =
+                                    Char::Char(questionmark_matches[questionmark_idx]);
                                 questionmark_idx += 1;
                             }
                             if self.pattern[pattern_idx].next_char == prev_input_char {
@@ -169,8 +231,8 @@ impl WildMatch {
                     }
 
                     // Match last char again
-                    if self.pattern[pattern_idx].next_char == Some('?')
-                        || self.pattern[pattern_idx].next_char == Some(input_char)
+                    if self.pattern[pattern_idx].next_char == Char::QuestionMark
+                        || self.pattern[pattern_idx].next_char == Char::Char(input_char)
                     {
                         pattern_idx += 1;
                     }
@@ -274,6 +336,15 @@ mod tests {
     #[test_case("da*da*da*", "daaadabadmanda")]
     #[test_case("*?", "xx")]
     fn match_long(pattern: &str, expected: &str) {
+        let m = WildMatch::new(pattern);
+        assert!(m.matches(expected));
+    }
+
+    #[test_case("~?", "?")]
+    #[test_case("~*", "*")]
+    #[test_case("~~", "~")]
+    #[test_case("?~~?", "a~b")]
+    fn match_escape(pattern: &str, expected: &str) {
         let m = WildMatch::new(pattern);
         assert!(m.matches(expected));
     }
